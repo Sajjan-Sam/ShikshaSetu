@@ -1,4 +1,4 @@
-# ShikshaSetu – AI Teaching Assistant
+# ShikshaSetu
 
 Run locally:
 
