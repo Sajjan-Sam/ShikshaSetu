@@ -5,7 +5,6 @@ import uuid
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Any, Optional
-from openai import OpenAI
 import random
 import re
 
@@ -15,7 +14,6 @@ def _get_api_key() -> str:
     key = os.getenv("OPENAI_API_KEY", "").strip()
     if not key:
         try:
-            import streamlit as st
             key = st.secrets.get("OPENAI_API_KEY", "").strip()
         except Exception:
             key = ""
@@ -64,7 +62,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS styling
+# Custom CSS styling (same as before)
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -223,6 +221,12 @@ st.markdown("""
         border-color: #f59e0b;
         color: #92400e;
     }
+    
+    .alert-error {
+        background-color: #fef2f2;
+        border-color: #ef4444;
+        color: #dc2626;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -257,14 +261,48 @@ def save_json(data: Dict[str, Any], filepath: str) -> bool:
         return False
 
 
-# AI Agent 1: Advanced MCQ Generator
+def check_api_key_status() -> tuple[bool, str]:
+    """Check if API key is available and provide status message"""
+    key = _get_api_key()
+    if not key:
+        return False, "⚠️ OpenAI API key not found in secrets. Using fallback question generation."
+    
+    # Test the API key with a minimal request
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=key)
+        
+        # Make a minimal test request
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "Hello"}],
+            max_tokens=5,
+            temperature=0
+        )
+        return True, "✅ OpenAI API key is working properly."
+        
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "quota" in error_msg or "billing" in error_msg:
+            return False, "💳 OpenAI API quota exceeded. Please check your billing and usage limits. Using fallback questions."
+        elif "invalid" in error_msg or "authentication" in error_msg:
+            return False, "🔑 Invalid OpenAI API key. Please check your key in secrets.toml. Using fallback questions."
+        else:
+            return False, f"❌ OpenAI API error: {str(e)[:100]}... Using fallback questions."
+
+
+# Enhanced AI Agent 1: MCQ Generator with Better Error Handling
 def generate_mcq_with_ai(topic: str, level: str, difficulty: int, count: int) -> List[Dict[str, Any]]:
     """
-    AI Agent 1: Elite MCQ Generator
-    - Creates university-level questions from top institutions
-    - Ensures exactly 4 unique options with one correct answer
-    - Returns clean, validated JSON structure
+    Enhanced AI Agent 1: MCQ Generator with robust error handling
     """
+    # Check API key status first
+    api_available, status_msg = check_api_key_status()
+    
+    if not api_available:
+        st.warning(status_msg)
+        return generate_enhanced_fallback_mcqs(topic, level, count)
+    
     difficulty_level = "introductory" if difficulty < 40 else "intermediate" if difficulty < 70 else "advanced"
     
     university_context = {
@@ -289,11 +327,6 @@ STRICT REQUIREMENTS:
 5. Options should be plausible but clearly distinguishable
 6. Include comprehensive explanations for the correct answer
 
-UNIVERSITY STYLE GUIDELINES:
-- MIT/Stanford style: Focus on problem-solving, analytical thinking, practical applications
-- Harvard style: Emphasize critical thinking, theoretical frameworks, conceptual understanding
-- Oxford/Cambridge style: Deep analytical reasoning, historical context, philosophical implications
-
 Return ONLY a valid JSON array with this exact schema:
 [
   {{
@@ -311,28 +344,26 @@ Count: {count}
 """
 
     try:
+        from openai import OpenAI
         key = _get_api_key()
-        if not key:
-            st.error("⚠️ OPENAI_API_KEY not configured. Using fallback questions.")
-            return generate_fallback_mcqs(topic, level, count)
-
         client = OpenAI(api_key=key)
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.3,  # Lower temperature for more consistent, academic questions
-            max_tokens=4000,
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are an expert academic question creator from elite universities. You produce rigorous, high-quality MCQs and return ONLY valid JSON arrays."
-                },
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ]
-        )
+        with st.spinner("🤖 AI is creating high-quality questions..."):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.3,
+                max_tokens=4000,
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": "You are an expert academic question creator from elite universities. You produce rigorous, high-quality MCQs and return ONLY valid JSON arrays."
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
+                ]
+            )
 
         data = _extract_json_array(response.choices[0].message.content)
 
@@ -372,101 +403,245 @@ Count: {count}
                     "explanation": explanation
                 })
 
-            except Exception as e:
+            except Exception:
                 continue  # Skip invalid questions
 
         if validated_questions:
+            st.success(f"✅ AI generated {len(validated_questions)} high-quality questions!")
             return validated_questions
         else:
-            st.warning("⚠️ AI generated questions didn't meet quality standards. Using fallback.")
-            return generate_fallback_mcqs(topic, level, count)
+            st.warning("⚠️ AI generated questions didn't meet quality standards. Using enhanced fallback.")
+            return generate_enhanced_fallback_mcqs(topic, level, count)
 
     except Exception as e:
-        st.error(f"❌ AI generation failed: {e}. Using fallback questions.")
-        return generate_fallback_mcqs(topic, level, count)
+        error_msg = str(e)
+        if "quota" in error_msg.lower() or "billing" in error_msg.lower():
+            st.error("💳 OpenAI API quota exceeded. Please check your billing and usage limits.")
+        elif "invalid" in error_msg.lower() or "authentication" in error_msg.lower():
+            st.error("🔑 Invalid OpenAI API key. Please check your key configuration.")
+        else:
+            st.error(f"❌ AI generation failed: {error_msg}")
+        
+        st.info("🔄 Using high-quality fallback questions instead.")
+        return generate_enhanced_fallback_mcqs(topic, level, count)
 
 
-def generate_fallback_mcqs(topic: str, level: str, count: int) -> List[Dict[str, Any]]:
-    """Generate high-quality fallback MCQs when AI is unavailable"""
-    fallback_questions = []
+def generate_enhanced_fallback_mcqs(topic: str, level: str, count: int) -> List[Dict[str, Any]]:
+    """Generate comprehensive high-quality fallback MCQs for various topics"""
     
-    # Predefined quality questions for different topics
-    question_templates = {
-        "Computer Science": [
-            {
-                "question": "What is the primary advantage of using dynamic programming in algorithm design?",
-                "options": {
-                    "A": "It reduces space complexity to O(1)",
-                    "B": "It eliminates the need for recursion entirely", 
-                    "C": "It avoids redundant calculations by storing intermediate results",
-                    "D": "It guarantees the optimal solution in polynomial time"
+    # Expanded question bank with more topics and difficulty levels
+    question_bank = {
+        "Computer Science": {
+            "UG": [
+                {
+                    "question": "What is the primary advantage of using dynamic programming in algorithm design?",
+                    "options": {
+                        "A": "It reduces space complexity to O(1) for all problems",
+                        "B": "It eliminates the need for recursion entirely", 
+                        "C": "It avoids redundant calculations by storing intermediate results",
+                        "D": "It guarantees finding the optimal solution in constant time"
+                    },
+                    "correct_answer": "C",
+                    "explanation": "Dynamic programming's main advantage is avoiding redundant calculations by storing and reusing intermediate results (memoization), which can dramatically improve time complexity from exponential to polynomial in many cases."
                 },
-                "correct_answer": "C",
-                "explanation": "Dynamic programming's main advantage is avoiding redundant calculations by storing and reusing intermediate results, leading to significant time complexity improvements."
-            },
-            {
-                "question": "In object-oriented programming, what is the main purpose of encapsulation?",
-                "options": {
-                    "A": "To increase program execution speed",
-                    "B": "To hide internal implementation details and protect data integrity",
-                    "C": "To enable multiple inheritance",
-                    "D": "To reduce memory usage"
+                {
+                    "question": "In object-oriented programming, what is the main purpose of encapsulation?",
+                    "options": {
+                        "A": "To increase program execution speed significantly",
+                        "B": "To hide internal implementation details and control access to data",
+                        "C": "To enable multiple inheritance from different classes",
+                        "D": "To automatically optimize memory usage"
+                    },
+                    "correct_answer": "B", 
+                    "explanation": "Encapsulation primarily serves to hide internal implementation details and control access to object properties and methods, promoting data integrity and code maintainability."
                 },
-                "correct_answer": "B", 
-                "explanation": "Encapsulation primarily serves to hide internal implementation details and protect data integrity by controlling access to object properties and methods."
-            }
-        ],
-        "Computer Vision": [
-            {
-                "question": "What is the primary purpose of convolutional layers in a Convolutional Neural Network (CNN)?",
-                "options": {
-                    "A": "To reduce the dimensionality of input images",
-                    "B": "To extract local features through learned filters", 
-                    "C": "To classify the final output",
-                    "D": "To normalize pixel values"
+                {
+                    "question": "Which data structure is most efficient for implementing a priority queue?",
+                    "options": {
+                        "A": "Linked List with sorted insertion",
+                        "B": "Binary Search Tree with balancing",
+                        "C": "Binary Heap (Min-heap or Max-heap)",
+                        "D": "Hash Table with priority indexing"
+                    },
+                    "correct_answer": "C",
+                    "explanation": "Binary heaps provide O(log n) insertion and deletion of the highest priority element, making them the most efficient standard implementation for priority queues."
                 },
-                "correct_answer": "B",
-                "explanation": "Convolutional layers use learned filters to extract local features like edges, textures, and patterns from input images through convolution operations."
-            },
-            {
-                "question": "Which technique is most commonly used to handle overfitting in deep learning models?",
-                "options": {
-                    "A": "Increasing the learning rate",
-                    "B": "Adding more layers to the network",
-                    "C": "Dropout and regularization techniques",
-                    "D": "Using smaller batch sizes"
+                {
+                    "question": "What is the time complexity of the quicksort algorithm in the average case?",
+                    "options": {
+                        "A": "O(n)",
+                        "B": "O(n log n)",
+                        "C": "O(n²)",
+                        "D": "O(log n)"
+                    },
+                    "correct_answer": "B",
+                    "explanation": "Quicksort has an average-case time complexity of O(n log n) when the pivot divides the array reasonably evenly. The worst case is O(n²) when the pivot is always the smallest or largest element."
                 },
-                "correct_answer": "C",
-                "explanation": "Dropout and regularization techniques like L1/L2 regularization are the most effective methods to prevent overfitting by reducing model complexity and improving generalization."
-            }
-        ]
+                {
+                    "question": "In database design, what is the primary goal of normalization?",
+                    "options": {
+                        "A": "To increase query execution speed",
+                        "B": "To reduce data redundancy and prevent anomalies",
+                        "C": "To maximize storage space utilization",
+                        "D": "To simplify database backup procedures"
+                    },
+                    "correct_answer": "B",
+                    "explanation": "Database normalization primarily aims to reduce data redundancy and prevent update, insertion, and deletion anomalies by organizing data into well-structured tables."
+                }
+            ],
+            "PG": [
+                {
+                    "question": "In distributed systems, what is the fundamental trade-off described by the CAP theorem?",
+                    "options": {
+                        "A": "Between computational speed, memory usage, and network bandwidth",
+                        "B": "Between Consistency, Availability, and Partition tolerance",
+                        "C": "Between security, scalability, and maintainability",
+                        "D": "Between latency, throughput, and fault tolerance"
+                    },
+                    "correct_answer": "B",
+                    "explanation": "The CAP theorem states that distributed systems can guarantee at most two out of three properties: Consistency (all nodes see the same data simultaneously), Availability (system remains operational), and Partition tolerance (system continues despite network failures)."
+                },
+                {
+                    "question": "Which machine learning technique is most suitable for handling sequential data with long-term dependencies?",
+                    "options": {
+                        "A": "Convolutional Neural Networks (CNNs)",
+                        "B": "Support Vector Machines (SVMs)",
+                        "C": "Long Short-Term Memory networks (LSTMs)",
+                        "D": "Random Forest algorithms"
+                    },
+                    "correct_answer": "C",
+                    "explanation": "LSTMs are specifically designed to handle sequential data and can capture long-term dependencies through their gating mechanisms, making them ideal for time series, natural language processing, and other sequential tasks."
+                }
+            ]
+        },
+        "Computer Vision": {
+            "UG": [
+                {
+                    "question": "What is the primary purpose of convolutional layers in a CNN?",
+                    "options": {
+                        "A": "To reduce the dimensionality of input images permanently",
+                        "B": "To extract local spatial features through learnable filters", 
+                        "C": "To perform the final classification of image content",
+                        "D": "To normalize pixel values across color channels"
+                    },
+                    "correct_answer": "B",
+                    "explanation": "Convolutional layers use learnable filters (kernels) to extract local spatial features like edges, textures, and patterns from input images through convolution operations, preserving spatial relationships."
+                },
+                {
+                    "question": "Which technique is most effective for preventing overfitting in deep neural networks?",
+                    "options": {
+                        "A": "Increasing the learning rate significantly",
+                        "B": "Adding more hidden layers to the network",
+                        "C": "Applying dropout and regularization techniques",
+                        "D": "Using smaller batch sizes during training"
+                    },
+                    "correct_answer": "C",
+                    "explanation": "Dropout randomly sets some neurons to zero during training, and regularization techniques (L1/L2) add penalty terms to prevent overfitting by reducing model complexity and improving generalization."
+                }
+            ],
+            "PG": [
+                {
+                    "question": "In advanced computer vision, what is the key innovation of attention mechanisms?",
+                    "options": {
+                        "A": "They eliminate the need for convolutional operations entirely",
+                        "B": "They allow models to focus on relevant parts of input dynamically",
+                        "C": "They automatically augment training data for better performance",
+                        "D": "They reduce computational requirements to linear complexity"
+                    },
+                    "correct_answer": "B",
+                    "explanation": "Attention mechanisms allow models to dynamically focus on the most relevant parts of the input, enabling better handling of long sequences and complex spatial relationships in vision tasks."
+                }
+            ]
+        },
+        "Machine Learning": {
+            "UG": [
+                {
+                    "question": "What is the bias-variance tradeoff in machine learning?",
+                    "options": {
+                        "A": "The balance between training speed and prediction accuracy",
+                        "B": "The tradeoff between model complexity and interpretability",
+                        "C": "The balance between underfitting and overfitting tendencies",
+                        "D": "The choice between supervised and unsupervised learning"
+                    },
+                    "correct_answer": "C",
+                    "explanation": "The bias-variance tradeoff refers to the balance between bias (underfitting - too simple models) and variance (overfitting - too complex models) to achieve optimal generalization performance."
+                }
+            ],
+            "PG": [
+                {
+                    "question": "In reinforcement learning, what does the exploration-exploitation dilemma address?",
+                    "options": {
+                        "A": "Whether to use model-based or model-free approaches",
+                        "B": "The balance between trying new actions vs. using known good actions",
+                        "C": "The choice between on-policy and off-policy methods",
+                        "D": "Whether to use discrete or continuous action spaces"
+                    },
+                    "correct_answer": "B",
+                    "explanation": "The exploration-exploitation dilemma is the fundamental challenge of balancing the exploration of new actions (to discover potentially better strategies) with exploitation of currently known good actions (to maximize immediate rewards)."
+                }
+            ]
+        },
+        "Mathematics": {
+            "UG": [
+                {
+                    "question": "What is the geometric interpretation of the determinant of a 2×2 matrix?",
+                    "options": {
+                        "A": "The length of the diagonal vector",
+                        "B": "The area of the parallelogram formed by column vectors",
+                        "C": "The angle between the two column vectors",
+                        "D": "The sum of all matrix elements"
+                    },
+                    "correct_answer": "B",
+                    "explanation": "The determinant of a 2×2 matrix represents the signed area of the parallelogram formed by its column vectors, with the sign indicating orientation."
+                }
+            ],
+            "PG": [
+                {
+                    "question": "In functional analysis, what defines a Hilbert space?",
+                    "options": {
+                        "A": "A normed space that is complete under its norm",
+                        "B": "A complete inner product space",
+                        "C": "A finite-dimensional vector space with orthogonal basis",
+                        "D": "A metric space with translation invariance"
+                    },
+                    "correct_answer": "B",
+                    "explanation": "A Hilbert space is a complete inner product space, meaning it has an inner product that induces a norm, and every Cauchy sequence converges within the space."
+                }
+            ]
+        }
     }
     
-    # Get templates for the topic, fallback to Computer Science if not found
-    templates = question_templates.get(topic, question_templates["Computer Science"])
+    # Get appropriate questions for the topic and level
+    topic_questions = question_bank.get(topic, question_bank["Computer Science"])
+    level_questions = topic_questions.get(level, topic_questions.get("UG", []))
     
-    # Generate questions up to the requested count
-    for i in range(count):
-        if i < len(templates):
-            fallback_questions.append(templates[i])
-        else:
-            # Generate generic question if we need more than available templates
-            fallback_questions.append({
-                "question": f"Advanced {topic} Concept {i+1}: What is a fundamental principle that forms the foundation of {topic} in {level} level studies?",
-                "options": {
-                    "A": f"Theoretical frameworks and mathematical foundations of {topic}",
-                    "B": f"Practical applications and implementation strategies in {topic}",
-                    "C": f"Historical development and evolution of {topic} concepts", 
-                    "D": f"Interdisciplinary connections between {topic} and other fields"
-                },
-                "correct_answer": "A",
-                "explanation": f"Theoretical frameworks and mathematical foundations provide the core conceptual understanding necessary for mastering {topic} at the {level} level, forming the basis for all advanced applications."
-            })
+    # If we don't have enough predefined questions, generate generic ones
+    fallback_questions = []
+    
+    # Use available predefined questions first
+    available_questions = min(len(level_questions), count)
+    fallback_questions.extend(level_questions[:available_questions])
+    
+    # Generate additional generic questions if needed
+    remaining_count = count - available_questions
+    for i in range(remaining_count):
+        question_num = available_questions + i + 1
+        fallback_questions.append({
+            "question": f"Which of the following best describes a fundamental concept in {topic} at the {level} level?",
+            "options": {
+                "A": f"Theoretical foundations and mathematical models in {topic}",
+                "B": f"Practical applications and real-world implementations of {topic}",
+                "C": f"Historical development and evolution of {topic} methodologies", 
+                "D": f"Interdisciplinary connections between {topic} and related fields"
+            },
+            "correct_answer": "A",
+            "explanation": f"Theoretical foundations and mathematical models provide the core conceptual framework necessary for understanding {topic} at the {level} level, forming the basis for all practical applications and advanced study."
+        })
     
     return fallback_questions
 
 
-# AI Agent 2: Intelligent Answer Evaluator
+# Enhanced AI Agent 2: Answer Evaluator with Better Error Handling
 def evaluate_answer_with_ai(
     question: str,
     student_answer: str,
@@ -475,14 +650,11 @@ def evaluate_answer_with_ai(
     options: Optional[Dict[str, str]] = None
 ) -> Dict[str, Any]:
     """
-    AI Agent 2: Advanced Answer Evaluator
-    - MCQ: Deterministic comparison with detailed feedback
-    - Subjective: AI-powered comprehensive evaluation with rubrics
+    Enhanced AI Agent 2: Answer Evaluator with robust error handling
     """
     
-    # MCQ Evaluation (Deterministic but with enhanced feedback)
+    # MCQ Evaluation (Deterministic)
     if question_type == "mcq":
-        # Convert options dict to list for processing
         if options:
             options_list = [options.get("A"), options.get("B"), options.get("C"), options.get("D")]
             correct_text = _letter_to_text(correct_answer, options_list)
@@ -505,23 +677,22 @@ def evaluate_answer_with_ai(
             "percentage": 100 if is_correct else 0,
         }
 
-    # Subjective Answer Evaluation (AI-powered)
+    # Subjective Answer Evaluation with better error handling
+    api_available, _ = check_api_key_status()
+    
+    if not api_available:
+        # Enhanced fallback evaluation for subjective questions
+        return evaluate_subjective_fallback(question, student_answer, correct_answer)
+    
     try:
+        from openai import OpenAI
         key = _get_api_key()
-        if not key:
-            return {
-                "score": 0, 
-                "max_score": 10, 
-                "feedback": "❌ OpenAI API key not configured for subjective evaluation.", 
-                "percentage": 0
-            }
-
         client = OpenAI(api_key=key)
         
         evaluation_prompt = f"""
-You are a strict but fair university professor evaluating student answers. 
+You are a university professor evaluating student answers with the rigor of top institutions.
 
-Evaluate this student's response with the rigor of top universities like MIT, Stanford, Harvard, Oxford, and Cambridge.
+Evaluate this response fairly and constructively:
 
 QUESTION: {question}
 
@@ -530,12 +701,12 @@ EXPECTED/REFERENCE ANSWER: {correct_answer}
 STUDENT'S ANSWER: {student_answer}
 
 EVALUATION CRITERIA:
-1. Correctness and accuracy of content (40%)
-2. Depth of understanding and analysis (25%)
-3. Clarity and organization of response (20%)
-4. Use of relevant examples or evidence (15%)
+1. Correctness and accuracy (40%)
+2. Depth of understanding (25%)
+3. Clarity and organization (20%)
+4. Use of examples/evidence (15%)
 
-Provide a score out of 10 and detailed constructive feedback (2-4 sentences).
+Provide a score out of 10 and detailed feedback (2-4 sentences).
 
 Return ONLY this JSON format:
 {{
@@ -546,11 +717,11 @@ Return ONLY this JSON format:
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            temperature=0.2,  # Low temperature for consistent evaluation
+            temperature=0.2,
             messages=[
                 {
                     "role": "system", 
-                    "content": "You are a university professor providing fair, detailed academic evaluations. Always return valid JSON only."
+                    "content": "You are a fair university professor providing detailed academic evaluations. Always return valid JSON only."
                 },
                 {
                     "role": "user", 
@@ -580,12 +751,71 @@ Return ONLY this JSON format:
         }
 
     except Exception as e:
+        st.warning(f"AI evaluation failed: {str(e)}. Using fallback evaluation.")
+        return evaluate_subjective_fallback(question, student_answer, correct_answer)
+
+
+def evaluate_subjective_fallback(question: str, student_answer: str, correct_answer: str) -> Dict[str, Any]:
+    """Enhanced fallback evaluation for subjective questions"""
+    
+    if not student_answer or not student_answer.strip():
         return {
             "score": 0,
             "max_score": 10,
-            "feedback": f"❌ Evaluation error: {str(e)}. Please review manually.",
+            "feedback": "❌ No answer provided. Please provide a response to receive credit.",
             "percentage": 0
         }
+    
+    answer_length = len(student_answer.strip().split())
+    answer_lower = student_answer.lower()
+    
+    # Basic content analysis
+    score = 2  # Base score for attempting the question
+    
+    # Length-based scoring
+    if answer_length >= 50:
+        score += 2
+    elif answer_length >= 20:
+        score += 1
+    
+    # Keyword matching with expected answer
+    expected_words = set(correct_answer.lower().split())
+    student_words = set(answer_lower.split())
+    
+    # Calculate overlap with expected answer
+    common_words = expected_words.intersection(student_words)
+    if expected_words:
+        overlap_ratio = len(common_words) / len(expected_words)
+        score += min(3, int(overlap_ratio * 6))  # Up to 3 additional points
+    
+    # Structure and effort indicators
+    if any(word in answer_lower for word in ['example', 'instance', 'such as', 'for example']):
+        score += 1
+    
+    if any(word in answer_lower for word in ['because', 'therefore', 'thus', 'hence', 'consequently']):
+        score += 1
+    
+    if any(word in answer_lower for word in ['however', 'although', 'nevertheless', 'on the other hand']):
+        score += 1
+    
+    score = min(score, 10)  # Cap at maximum score
+    
+    # Generate feedback based on score
+    if score >= 8:
+        feedback = "✅ Excellent response! Your answer demonstrates strong understanding with good examples and reasoning."
+    elif score >= 6:
+        feedback = "👍 Good answer! Your response shows understanding but could benefit from more detail or examples."
+    elif score >= 4:
+        feedback = "📚 Fair attempt. Your answer has some relevant points but needs more depth and clarity."
+    else:
+        feedback = "⚠️ Basic response. Please provide more detailed explanations and specific examples to improve your score."
+    
+    return {
+        "score": score,
+        "max_score": 10,
+        "feedback": feedback,
+        "percentage": round(score * 10, 1)
+    }
 
 
 def generate_items(config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -595,13 +825,12 @@ def generate_items(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     
     # Generate AI-powered MCQ items
     if config.get('mcq_count', 0) > 0:
-        with st.spinner("🤖 Generating high-quality MCQs with AI..."):
-            ai_mcqs = generate_mcq_with_ai(
-                config['topic'], 
-                config['level'], 
-                config['difficulty'], 
-                config['mcq_count']
-            )
+        ai_mcqs = generate_mcq_with_ai(
+            config['topic'], 
+            config['level'], 
+            config['difficulty'], 
+            config['mcq_count']
+        )
         
         for mcq in ai_mcqs:
             items.append({
@@ -895,6 +1124,21 @@ if not st.session_state.authenticated:
     </div>
     """, unsafe_allow_html=True)
     
+    # Show API status
+    api_available, status_msg = check_api_key_status()
+    if api_available:
+        st.markdown(f"""
+        <div class="custom-alert alert-success">
+            {status_msg}
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="custom-alert alert-warning">
+            {status_msg}
+        </div>
+        """, unsafe_allow_html=True)
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -1069,6 +1313,23 @@ if st.session_state.user_role == "professor":
             </div>
             """, unsafe_allow_html=True)
             
+            # Show API status in sidebar
+            api_available, status_msg = check_api_key_status()
+            if api_available:
+                st.success("🤖 AI Generation: Available")
+            else:
+                st.warning("🔧 AI Generation: Using Fallback Mode")
+                with st.expander("ℹ️ Why am I seeing this?"):
+                    st.info(status_msg)
+                    st.markdown("""
+                    **How to fix:**
+                    1. Check your OpenAI API key in secrets.toml
+                    2. Ensure you have sufficient credits/quota
+                    3. Verify your key has the correct permissions
+                    
+                    **Don't worry:** The app will use high-quality fallback questions!
+                    """)
+            
             topic = st.text_input("📚 Topic", value="Computer Science", help="Enter the subject topic")
             level = st.selectbox("🎓 Academic Level", ["UG", "PG"], help="Select academic level")
             
@@ -1094,15 +1355,14 @@ if st.session_state.user_role == "professor":
                     'difficulty': difficulty
                 }
                 
-                with st.spinner("🔄 Generating assignment with AI..."):
-                    items = generate_items(config)
-                    st.session_state.assignment = {
-                        'id': str(uuid.uuid4()),
-                        'config': config,
-                        'items': items,
-                        'created_at': datetime.now().isoformat(),
-                        'created_by': st.session_state.user_email
-                    }
+                items = generate_items(config)
+                st.session_state.assignment = {
+                    'id': str(uuid.uuid4()),
+                    'config': config,
+                    'items': items,
+                    'created_at': datetime.now().isoformat(),
+                    'created_by': st.session_state.user_email
+                }
                 
                 st.success(f"✅ Generated {len(items)} questions!")
         
@@ -1213,78 +1473,84 @@ if st.session_state.user_role == "professor":
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         if st.button("🤖 Evaluate All Responses", type="primary"):
-                            with st.spinner("🔄 AI is evaluating all responses..."):
-                                for response_file in response_files:
-                                    response_data = load_json(f"data/{response_file}")
-                                    student_email = response_data['student_email']
-                                    
-                                    # Evaluate each question using AI
-                                    detailed_results = []
-                                    total_score = 0
-                                    max_total = 0
-                                    
-                                    for item in selected_assignment['items']:
-                                        student_answer = response_data['responses'].get(item['id'], '')
-                                        
-                                        # Use enhanced AI evaluation
-                                        eval_result = evaluate_answer_with_ai(
-                                            item['stem'],
-                                            student_answer,
-                                            item['answer_key'],
-                                            item['type'],
-                                            options=item.get('options') if item['type'] == 'mcq' else None
-                                        )
-                                        
-                                        detailed_results.append({
-                                            'question_id': item['id'],
-                                            'question_type': item['type'],
-                                            'question_text': item['stem'],
-                                            'score': eval_result['score'],
-                                            'max_score': eval_result['max_score'],
-                                            'feedback': eval_result['feedback'],
-                                            'student_answer': student_answer
-                                        })
-                                        
-                                        total_score += eval_result['score']
-                                        max_total += eval_result['max_score']
-                                    
-                                    # Calculate final results
-                                    percentage = (total_score / max_total * 100) if max_total > 0 else 0
-                                    
-                                    if percentage >= 90:
-                                        grade = "A+"
-                                    elif percentage >= 85:
-                                        grade = "A"
-                                    elif percentage >= 80:
-                                        grade = "A-"
-                                    elif percentage >= 75:
-                                        grade = "B+"
-                                    elif percentage >= 70:
-                                        grade = "B"
-                                    elif percentage >= 65:
-                                        grade = "B-"
-                                    elif percentage >= 60:
-                                        grade = "C+"
-                                    elif percentage >= 55:
-                                        grade = "C"
-                                    elif percentage >= 50:
-                                        grade = "C-"
-                                    else:
-                                        grade = "F"
-                                    
-                                    evaluation_results = {
-                                        'total_score': total_score,
-                                        'max_score': max_total,
-                                        'percentage': round(percentage, 1),
-                                        'grade': grade,
-                                        'detailed_results': detailed_results,
-                                        'overall_feedback': f"Overall performance: {'Outstanding' if percentage >= 90 else 'Excellent' if percentage >= 80 else 'Good' if percentage >= 70 else 'Satisfactory' if percentage >= 60 else 'Needs Improvement'}"
-                                    }
-                                    
-                                    # Save evaluation results
-                                    save_evaluation_results(student_email, selected_assignment['id'], evaluation_results)
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            for idx, response_file in enumerate(response_files):
+                                progress_bar.progress((idx + 1) / len(response_files))
+                                response_data = load_json(f"data/{response_file}")
+                                student_email = response_data['student_email']
+                                status_text.text(f"Evaluating {get_username_from_email(student_email)}...")
                                 
-                                st.success("✅ All responses evaluated successfully using advanced AI!")
+                                # Evaluate each question
+                                detailed_results = []
+                                total_score = 0
+                                max_total = 0
+                                
+                                for item in selected_assignment['items']:
+                                    student_answer = response_data['responses'].get(item['id'], '')
+                                    
+                                    # Use enhanced evaluation with error handling
+                                    eval_result = evaluate_answer_with_ai(
+                                        item['stem'],
+                                        student_answer,
+                                        item['answer_key'],
+                                        item['type'],
+                                        options=item.get('options') if item['type'] == 'mcq' else None
+                                    )
+                                    
+                                    detailed_results.append({
+                                        'question_id': item['id'],
+                                        'question_type': item['type'],
+                                        'question_text': item['stem'],
+                                        'score': eval_result['score'],
+                                        'max_score': eval_result['max_score'],
+                                        'feedback': eval_result['feedback'],
+                                        'student_answer': student_answer
+                                    })
+                                    
+                                    total_score += eval_result['score']
+                                    max_total += eval_result['max_score']
+                                
+                                # Calculate final results
+                                percentage = (total_score / max_total * 100) if max_total > 0 else 0
+                                
+                                if percentage >= 90:
+                                    grade = "A+"
+                                elif percentage >= 85:
+                                    grade = "A"
+                                elif percentage >= 80:
+                                    grade = "A-"
+                                elif percentage >= 75:
+                                    grade = "B+"
+                                elif percentage >= 70:
+                                    grade = "B"
+                                elif percentage >= 65:
+                                    grade = "B-"
+                                elif percentage >= 60:
+                                    grade = "C+"
+                                elif percentage >= 55:
+                                    grade = "C"
+                                elif percentage >= 50:
+                                    grade = "C-"
+                                else:
+                                    grade = "F"
+                                
+                                evaluation_results = {
+                                    'total_score': total_score,
+                                    'max_score': max_total,
+                                    'percentage': round(percentage, 1),
+                                    'grade': grade,
+                                    'detailed_results': detailed_results,
+                                    'overall_feedback': f"Overall performance: {'Outstanding' if percentage >= 90 else 'Excellent' if percentage >= 80 else 'Good' if percentage >= 70 else 'Satisfactory' if percentage >= 60 else 'Needs Improvement'}"
+                                }
+                                
+                                # Save evaluation results
+                                save_evaluation_results(student_email, selected_assignment['id'], evaluation_results)
+                            
+                            progress_bar.progress(1.0)
+                            status_text.text("✅ All evaluations complete!")
+                            st.success("✅ All responses evaluated successfully!")
                     
                     with col2:
                         scores_released = selected_assignment.get('scores_released', False)
@@ -1345,7 +1611,66 @@ if st.session_state.user_role == "professor":
     
     with tab4:
         st.markdown("### 📈 Analytics Dashboard")
-        st.info("📊 Advanced analytics features coming soon!")
+        
+        published_assignments = get_published_assignments()
+        if not published_assignments:
+            st.markdown("""
+            <div class="custom-alert alert-info">
+                <strong>📊 No Data Available</strong><br>
+                Publish assignments and collect student responses to view analytics.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            # Overall Statistics
+            st.markdown("#### 📈 Overall Statistics")
+            
+            total_assignments = len(published_assignments)
+            total_students = len(load_users().get("allowed_users", {}))
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown(f"""
+                <div class="metric-container">
+                    <div style="font-size: 1.5rem; font-weight: 600; color: #3b82f6;">{total_assignments}</div>
+                    <div style="color: #6b7280;">Total Assignments</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(f"""
+                <div class="metric-container">
+                    <div style="font-size: 1.5rem; font-weight: 600; color: #3b82f6;">{total_students}</div>
+                    <div style="color: #6b7280;">Registered Students</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Calculate response rate
+            total_possible_responses = 0
+            total_actual_responses = 0
+            
+            for assignment in published_assignments:
+                total_possible_responses += total_students
+                response_files = [f for f in os.listdir("data") if f.startswith(f"response_") and f.endswith(f"_{assignment['id']}.json")]
+                total_actual_responses += len(response_files)
+            
+            response_rate = (total_actual_responses / total_possible_responses * 100) if total_possible_responses > 0 else 0
+            
+            with col3:
+                st.markdown(f"""
+                <div class="metric-container">
+                    <div style="font-size: 1.5rem; font-weight: 600; color: #3b82f6;">{response_rate:.1f}%</div>
+                    <div style="color: #6b7280;">Response Rate</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col4:
+                scores_released_count = sum(1 for a in published_assignments if a.get('scores_released', False))
+                st.markdown(f"""
+                <div class="metric-container">
+                    <div style="font-size: 1.5rem; font-weight: 600; color: #3b82f6;">{scores_released_count}</div>
+                    <div style="color: #6b7280;">Scores Released</div>
+                </div>
+                """, unsafe_allow_html=True)
 
 
 # Student Dashboard
@@ -1482,6 +1807,39 @@ else:
                 </div>
                 """, unsafe_allow_html=True)
             else:
+                # Overall performance summary
+                total_assignments = len(results)
+                total_percentage = sum(result["evaluation"]["results"]["percentage"] for result in results)
+                average_percentage = total_percentage / total_assignments if total_assignments > 0 else 0
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"""
+                    <div class="metric-container">
+                        <div style="font-size: 1.5rem; font-weight: 600; color: #1e40af;">{total_assignments}</div>
+                        <div style="color: #6b7280;">Completed</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown(f"""
+                    <div class="metric-container">
+                        <div style="font-size: 1.5rem; font-weight: 600; color: #1e40af;">{average_percentage:.1f}%</div>
+                        <div style="color: #6b7280;">Average Score</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col3:
+                    best_score = max(result["evaluation"]["results"]["percentage"] for result in results)
+                    st.markdown(f"""
+                    <div class="metric-container">
+                        <div style="font-size: 1.5rem; font-weight: 600; color: #1e40af;">{best_score:.1f}%</div>
+                        <div style="color: #6b7280;">Best Score</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("#### 📋 Assignment Results")
+                
                 for result in results:
                     assignment = result["assignment"]
                     evaluation = result["evaluation"]
